@@ -212,7 +212,9 @@ If you encounter an issue, include the steps to reproduce it, the gesture involv
 
 ---
 
-\<p align="center">
-&#x20; \<strong>GesturePC\</strong>\<br/>
-&#x20; \<em>From recognizing gestures to anticipating workflows.\</em>
-\</p>
+
+<p align="center">
+  <strong>GesturePC</strong><br/>
+  <em>From recognizing gestures to anticipating workflows.</em>
+</p>
+
