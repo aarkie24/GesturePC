@@ -1,0 +1,6 @@
+# Gesture PC - Development and Testing Dependencies
+-r requirements.txt
+
+pytest>=8.0.0
+pytest-qt>=4.4.0
+hypothesis>=6.100.0

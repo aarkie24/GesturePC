@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=65.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gesture-pc"
+version = "0.1.0"
+description = "Customizable Windows desktop gesture automation system"
+authors = [{ name = "Gesture PC Team" }]
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "mediapipe==0.10.14",
+    "numpy>=1.26.0,<3.0.0",
+    "opencv-python>=4.10.0,<5.0.0",
+    "platformdirs>=4.0.0,<5.0.0",
+    "psutil>=5.9.0,<8.0.0",
+    "pydantic>=2.10.0,<3.0.0",
+    "PySide6>=6.6.0,<7.0.0",
+    "pywin32>=306",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-qt>=4.4.0",
+    "hypothesis>=6.100.0",
+]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+pythonpath = ["."]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-ra -q --strict-markers"
+filterwarnings = [
+    "ignore::DeprecationWarning:google.protobuf.*",
+    "ignore::DeprecationWarning:mediapipe.*",
+]
+markers = [
+    "unit: Pure unit tests without I/O or external systems",
+    "integration: Tests exercising multiple cooperating components",
+    "architecture: Tests verifying structural rules, boundaries, and imports",
+    "ui: Offscreen Qt UI tests",
+    "slow: Tests taking more than 1 second to execute",
+]

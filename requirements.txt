@@ -1,0 +1,11 @@
+# Gesture PC - Production Runtime Dependencies
+# Pinned as validated during Milestone 0 feasibility spike
+
+mediapipe==0.10.14
+numpy>=1.26.0,<3.0.0
+opencv-python>=4.10.0,<5.0.0
+platformdirs>=4.0.0,<5.0.0
+psutil>=5.9.0,<8.0.0
+pydantic>=2.10.0,<3.0.0
+PySide6>=6.6.0,<7.0.0
+pywin32>=306
