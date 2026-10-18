@@ -12,8 +12,7 @@ import numpy as np
 from camera.frame_types import FramePacket, LatestFrameMailbox, LosslessFrameQueue
 from domain.enums import PipelineErrorCode
 from domain.events import PipelineErrorOccurred
-from domain.ports import CameraBackend
-from services.event_bus import EventBus
+from domain.ports import CameraBackend, EventPublisher
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +25,7 @@ class CaptureWorker:
         backend: CameraBackend,
         live_mailbox: LatestFrameMailbox,
         recording_queue: Optional[LosslessFrameQueue] = None,
-        event_bus: Optional[EventBus] = None,
+        event_bus: Optional[EventPublisher] = None,
     ) -> None:
         self._backend = backend
         self._live_mailbox = live_mailbox

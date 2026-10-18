@@ -19,6 +19,7 @@ class QtBridge(QObject):
     mode_changed = Signal(str, str)  # (mode, reason)
     pipeline_error = Signal(str, str)  # (code, message)
     frame_ready = Signal(object, object)  # (FramePacket, Optional[TrackingResult])
+    frame_analysis_ready = Signal(object)  # (FrameAnalysis)
     trigger_recognized = Signal(object)  # (RecognitionEvent)
 
     def __init__(self, event_bus: EventBus) -> None:
@@ -35,3 +36,11 @@ class QtBridge(QObject):
     def emit_frame(self, frame_packet: Any, tracking_result: Optional[Any] = None) -> None:
         """Called by recognition or capture worker to post new frame to UI."""
         self.frame_ready.emit(frame_packet, tracking_result)
+
+    def emit_frame_analysis(self, analysis: Any) -> None:
+        """Called by recognition pipeline to emit per-frame diagnostics."""
+        self.frame_analysis_ready.emit(analysis)
+
+    def emit_trigger_recognized(self, event: Any) -> None:
+        """Called when an accepted trigger event is produced."""
+        self.trigger_recognized.emit(event)

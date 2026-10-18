@@ -26,3 +26,11 @@ class FakeClock:
         if seconds < 0:
             raise ValueError("Time cannot move backward")
         self._current_time += seconds
+
+    def set_time(self, seconds: float) -> None:
+        """Explicitly sets clock time in seconds."""
+        self._current_time = seconds
+
+    def set_ns(self, ts_ns: int) -> None:
+        """Explicitly sets clock time in nanoseconds."""
+        self._current_time = ts_ns / 1_000_000_000.0

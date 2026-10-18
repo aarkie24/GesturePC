@@ -72,6 +72,12 @@ class RuntimeController:
             return self._mode
 
     @property
+    def current_mode(self) -> RuntimeMode:
+        """Alias for mode property."""
+        with self._lock:
+            return self._mode
+
+    @property
     def active_sink(self) -> EventSink:
         with self._lock:
             return self._active_sink

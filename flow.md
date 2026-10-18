@@ -264,6 +264,49 @@ This document explains how files, classes, and functions connect with each other
    - Clears pending dispatcher items.
 6. Total stop latency target: $p95 \le 100\text{ ms}$.
 
+### Flow E: Static Gesture Recording & Calibration in Gesture Studio
+1. User selects target hand (`RIGHT`, `LEFT`, or `EITHER`) and clicks "Start Recording".
+2. `RuntimeController.transition_to(RuntimeMode.RECORDING)`:
+   - Camera starts delivering frames to `CaptureWorker`.
+   - Lossless queue activated (`recording_queue`).
+3. `StaticGestureRecorder`:
+   - Enters `COUNTDOWN` state (3000 ms countdown). Shows live preview with countdown and quality indicator (hand present & steady).
+   - Enters `CAPTURING` state: gathers frames over `static_capture_window_ms` (1500 ms).
+   - On window completion, invokes `RecordingValidator.validate_static_recording()`:
+     - Verifies hand presence, consistency, speed $\le 0.35$ palm units/s, and pose deviation $\le 0.10$ palm units against running median pose.
+     - Selects up to 30 evenly spaced valid sample frames.
+4. `GestureService.check_static_collisions()`:
+   - Computes base threshold $1.5 \times p95(r)$ clamped to $[0.06, 0.30]$.
+   - Checks minimum MLD against all existing gestures of the same hand.
+   - If collision detected, UI warns the user with conflicting gesture name and distance.
+5. User enters gesture name and clicks "Save Gesture" (or "Save Anyway"):
+   - Persists gesture metadata and raw landmark BLOBs in SQLite in a single transaction.
+   - Fires `GestureRegistered` event.
+   - `SnapshotService` debounces and compiles new `TemplateSnapshot` with atomic reference swap.
+
+### Flow F: Safe Evaluation in Test Mode (Recognition Only)
+1. User clicks "Start Test" on `TestingTab` (or `LiveMonitorTab`).
+2. `RuntimeController` transitions to `RuntimeMode.TEST`:
+   - `active_sink` set to `DiagnosticSink`.
+   - Camera pipeline starts.
+3. `RecognitionPipeline` background worker thread polls frames from `camera_manager.live_mailbox`:
+   - `HandTracker` extracts 3D world landmarks and aspect-corrected image landmarks.
+   - `HandSelector` selects designated hand according to `tracked_hand`.
+   - `RecognitionEngine` calculates 80 ms EMA hand speed.
+   - If hand is stationary:
+     - `normalize_world_landmarks()` translates wrist to origin and scales by palm unit ($\|L_9 - L_0\|$).
+     - `extract_static_features()` builds 60-element feature vector.
+     - `StaticMatcher.match()` evaluates template distances and margin ratio ($d_1 / d_2 \le 0.80$).
+     - `TriggerValidator.update()` tracks temporal stability hold toward 400 ms.
+4. `RecognitionEngine` produces `FrameAnalysis` and optional `RecognitionEvent`.
+5. `active_sink` (`DiagnosticSink`) receives diagnostics and events:
+   - Forwards to `QtBridge`.
+   - Zero execution capability: cannot admit, dispatch, or execute actions (Rule R4 / AC-09).
+6. `QtBridge` updates `TestingTab`:
+   - Real-time diagnostic telemetry (speed, best match, distance, threshold, margin, trigger state).
+   - Stability hold progress bar (0 to 400 ms).
+   - Accepted triggers table.
+
 ---
 
 ## 4. Threading Architecture & Boundaries

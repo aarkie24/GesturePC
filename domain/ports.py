@@ -36,6 +36,15 @@ class Clock(Protocol):
 
 
 @runtime_checkable
+class EventPublisher(Protocol):
+    """Port for publishing domain events."""
+
+    def publish(self, event: Any) -> None:
+        """Publishes an event to subscribers."""
+        ...
+
+
+@runtime_checkable
 class CameraBackend(Protocol):
     """Port for video capture hardware abstraction."""
 

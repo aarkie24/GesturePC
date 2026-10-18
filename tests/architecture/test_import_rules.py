@@ -77,3 +77,75 @@ def test_rule_domain_purity():
                     violations.append(f"{py_file.name} imports forbidden '{imp}'")
 
     assert not violations, f"Domain Purity Violations:\n" + "\n".join(violations)
+
+
+def test_rule_r2_recognition_isolation():
+    """Rule R2: gestures/ and camera/ MUST NOT import workflows.*, services.*, or adapters.*."""
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    check_dirs = [repo_root / "gestures", repo_root / "camera"]
+
+    forbidden_prefixes = (
+        "workflows",
+        "services",
+        "adapters",
+    )
+
+    violations: List[str] = []
+    for directory in check_dirs:
+        if not directory.exists():
+            continue
+        for py_file in directory.rglob("*.py"):
+            imports = get_imports_from_file(py_file)
+            for imp in imports:
+                for forbidden in forbidden_prefixes:
+                    if imp == forbidden or imp.startswith(forbidden + "."):
+                        violations.append(f"{py_file.name} imports forbidden '{imp}'")
+
+    assert not violations, f"Rule R2 Violations:\n" + "\n".join(violations)
+
+
+def test_rule_r4_diagnostic_sink_isolation():
+    """Rule R4: DiagnosticSink must have no import paths to execution gate, dispatcher, executor, or adapters."""
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    sink_file = repo_root / "services" / "diagnostic_sink.py"
+    if not sink_file.exists():
+        return
+
+    forbidden_prefixes = (
+        "services.execution_gate",
+        "workflows.execution_dispatcher",
+        "workflows.workflow_executor",
+        "adapters",
+    )
+
+    imports = get_imports_from_file(sink_file)
+    violations: List[str] = []
+    for imp in imports:
+        for forbidden in forbidden_prefixes:
+            if imp == forbidden or imp.startswith(forbidden + "."):
+                violations.append(f"diagnostic_sink.py imports forbidden '{imp}'")
+
+    assert not violations, f"Rule R4 Violations:\n" + "\n".join(violations)
+
+
+def test_rule_r10_sqlite_isolation():
+    """Rule R10: Only database/ may import sqlite3."""
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    check_dirs = [
+        repo_root / "domain",
+        repo_root / "gestures",
+        repo_root / "camera",
+        repo_root / "ui",
+    ]
+
+    violations: List[str] = []
+    for directory in check_dirs:
+        if not directory.exists():
+            continue
+        for py_file in directory.rglob("*.py"):
+            imports = get_imports_from_file(py_file)
+            if "sqlite3" in imports:
+                violations.append(f"{py_file.name} imports sqlite3 outside database/")
+
+    assert not violations, f"Rule R10 Violations:\n" + "\n".join(violations)
+

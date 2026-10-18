@@ -37,6 +37,8 @@ class MainWindow(QMainWindow):
         on_start_live: Callable[[], None],
         on_emergency_stop: Callable[[], None],
         qt_bridge: Optional[QtBridge] = None,
+        gesture_service: Optional[Any] = None,
+        runtime_controller: Optional[Any] = None,
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
@@ -48,6 +50,8 @@ class MainWindow(QMainWindow):
         self._on_start_live = on_start_live
         self._on_emergency_stop = on_emergency_stop
         self._qt_bridge = qt_bridge
+        self._gesture_service = gesture_service
+        self._runtime_controller = runtime_controller
 
         self._current_mode: RuntimeMode = RuntimeMode.STOPPED
 
@@ -89,15 +93,37 @@ class MainWindow(QMainWindow):
         )
         self.tabs.addTab(self.live_monitor_tab, "Live Monitor")
 
-        # Tab Placeholders for M3-M7
-        self.gesture_studio_tab = QWidget()
-        self.workflow_studio_tab = QWidget()
-        self.testing_tab = QWidget()
-        self.settings_tab = QWidget()
-
+        # Tab 2: Gesture Studio (M3)
+        if self._gesture_service is not None and self._runtime_controller is not None:
+            from ui.tabs.gesture_studio_tab import GestureStudioTab
+            self.gesture_studio_tab = GestureStudioTab(
+                gesture_service=self._gesture_service,
+                runtime_controller=self._runtime_controller,
+                qt_bridge=self._qt_bridge,
+                parent=self.tabs,
+            )
+        else:
+            self.gesture_studio_tab = QWidget()
         self.tabs.addTab(self.gesture_studio_tab, "Gesture Studio")
+
+        # Tab 3: Workflow Studio (M5 placeholder)
+        self.workflow_studio_tab = QWidget()
         self.tabs.addTab(self.workflow_studio_tab, "Workflow Studio")
+
+        # Tab 4: Testing Studio (M3)
+        if self._runtime_controller is not None:
+            from ui.tabs.testing_tab import TestingTab
+            self.testing_tab = TestingTab(
+                runtime_controller=self._runtime_controller,
+                qt_bridge=self._qt_bridge,
+                parent=self.tabs,
+            )
+        else:
+            self.testing_tab = QWidget()
         self.tabs.addTab(self.testing_tab, "Testing Studio")
+
+        # Tab 5: Settings (M7 placeholder)
+        self.settings_tab = QWidget()
         self.tabs.addTab(self.settings_tab, "Settings")
 
         layout.addWidget(self.tabs)

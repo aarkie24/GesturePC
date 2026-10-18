@@ -276,3 +276,39 @@ This document tracks all major design and engineering decisions for **Gesture PC
 * **Decision:** In LIVE and TEST modes, capture writes into a single-slot `LatestFrameMailbox` that overwrites older unconsumed frames, recording exact `time.monotonic_ns()` at grab time. In RECORDING mode, frames route to a bounded 300-frame lossless queue.
 * **Reason:** Prevents stale action triggers, eliminates latency accumulation, and bounds memory usage to zero queue growth.
 * **Enforcement:** `camera/frame_types.py`, `camera/capture_worker.py`.
+
+---
+
+### DEC-25: Mean Landmark Deviation (MLD) in Normalized Palm Units for Static Pose Matching
+* **Status:** Accepted (Validated in Milestone 3)
+* **Context:** Static gestures must be matched invariantly to hand distance, camera zoom, hand size, and screen resolution, while preserving hand orientation (e.g. distinguishing Thumbs Up from Thumbs Down).
+* **Decision:** Metric world landmarks are normalized by translating the wrist (landmark 0) to origin and scaling all 3D coordinates by the palm unit ($\|L_9 - L_0\|_2$). The wrist (now [0, 0, 0]) is dropped, leaving 20 landmarks (60 values). Static distance is computed as the Mean Landmark Deviation (MLD) across the 20 landmarks: $\text{MLD}(a, b) = \frac{1}{20} \sum_{i=1}^{20} \|a_i - b_i\|_2$.
+* **Reason:** Palm units provide scale-invariant units of measure with intuitive physical meaning. Orientation is preserved because rotation-invariant matching would falsely conflate opposing gestures.
+* **Enforcement:** `gestures/normalizer.py`, `gestures/feature_extractor.py`, `gestures/static_matcher.py`.
+
+---
+
+### DEC-26: Margin Ratio Test for Ambiguity Rejection
+* **Status:** Accepted (Validated in Milestone 3)
+* **Context:** If a hand pose is close to two different recorded gestures, choosing the best match by distance alone risks false classification.
+* **Decision:** Enforce a margin ratio test: the best candidate gesture $g_1$ is accepted if and only if $d_1 \le \text{effective\_threshold}(g_1)$ and $(g_2 \text{ is None or } d_1 / \max(d_2, 10^{-6}) \le \text{margin\_ratio})$ where default `margin_ratio` is 0.80.
+* **Reason:** Rejects borderline or ambiguous poses as `AMBIGUOUS_MARGIN` instead of triggering unexpected actions.
+* **Enforcement:** `gestures/static_matcher.py`, Section 7.4.
+
+---
+
+### DEC-27: Dynamic Threshold Calibration with Slack Clamps [0.06, 0.30]
+* **Status:** Accepted (Validated in Milestone 3)
+* **Context:** Hardcoding fixed thresholds fails because some hand poses have higher natural intra-user variance than others.
+* **Decision:** Thresholds are dynamically derived at load time from recorded sample observations: for each sample $i$, compute $r_i = \min_{j \neq i} \text{MLD}(\text{sample}_i, \text{sample}_j)$; then $\text{base} = \text{clamp}(1.5 \times p95(r), 0.06, 0.30)$. Effective threshold is $\text{base} \times \text{global\_sensitivity} \times \text{gesture.threshold\_scale}$.
+* **Reason:** Adapts automatically to the stability of the user's recorded poses while clamping to prevent overly permissive or impossibly strict thresholds.
+* **Enforcement:** `gestures/calibration.py`, `gestures/template_loader.py`.
+
+---
+
+### DEC-28: Single Component Ownership of Time-Based Cooldowns via TriggerValidator
+* **Status:** Accepted (Validated in Milestone 3)
+* **Context:** Avoiding timing discrepancies between Test mode and Live mode, and preventing repeated triggers from held hand poses.
+* **Decision:** `TriggerValidator` is the sole owner of all time-based stability accumulation (400 ms), tracking gap tolerance (120 ms), per-gesture cooldowns (1500 ms), rearming release (300 ms), and global event intervals (500 ms). It runs identically in Test and Live modes using monotonically increasing frame timestamps injected via the `Clock` port. Hand speed is smoothed with an 80 ms time-constant exponential moving average (EMA) filter.
+* **Reason:** Ensures deterministic behavior in tests, prevents held poses from repeatedly firing actions, and guarantees Test mode accurately previews Live mode behavior.
+* **Enforcement:** `gestures/trigger_validator.py`, `gestures/recognition_engine.py`, Criterion AC-06.

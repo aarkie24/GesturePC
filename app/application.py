@@ -13,6 +13,8 @@ from adapters.windows.session_events import Win32SessionEventSource
 from app.config import SettingsSchema
 from app.paths import get_database_path
 from camera.camera_manager import CameraManager
+from camera.hand_tracker import HandTracker
+from camera.mediapipe_backend import MediaPipeTrackerBackend
 from camera.opencv_backend import OpenCVCameraBackend
 from database.connection import create_connection
 from database.migrator import DatabaseMigrator
@@ -22,10 +24,17 @@ from database.repositories.log_repository import LogRepository
 from database.repositories.settings_repository import SettingsRepository
 from database.repositories.workflow_repository import WorkflowRepository
 from domain.enums import RuntimeMode
+from domain.ports import Clock
+from gestures.recognition_engine import RecognitionEngine
+from gestures.template_loader import TemplateLoader
+from gestures.trigger_validator import TriggerValidator
 from services.diagnostic_sink import DiagnosticSink
 from services.event_bus import EventBus
 from services.execution_gate import ExecutionGate
+from services.gesture_service import GestureService
+from services.recognition_pipeline import RecognitionPipeline
 from services.runtime_controller import RuntimeController
+from services.snapshot_service import SnapshotService
 from ui.main_window import MainWindow
 from ui.qt_bridge import QtBridge
 
@@ -50,6 +59,10 @@ class Application:
         runtime_controller: RuntimeController,
         qt_bridge: QtBridge,
         main_window: MainWindow,
+        gesture_service: Optional[Any] = None,
+        snapshot_service: Optional[Any] = None,
+        recognition_pipeline: Optional[Any] = None,
+        hand_tracker: Optional[Any] = None,
         hotkey_service: Optional[Win32GlobalHotkey] = None,
         session_watcher: Optional[Win32SessionEventSource] = None,
     ) -> None:
@@ -66,6 +79,10 @@ class Application:
         self.runtime_controller = runtime_controller
         self.qt_bridge = qt_bridge
         self.main_window = main_window
+        self.gesture_service = gesture_service
+        self.snapshot_service = snapshot_service
+        self.recognition_pipeline = recognition_pipeline
+        self.hand_tracker = hand_tracker
         self.hotkey_service = hotkey_service
         self.session_watcher = session_watcher
 
@@ -114,6 +131,12 @@ class Application:
         event_bus = EventBus()
         qt_bridge = QtBridge(event_bus)
 
+        # 4b. Template Loader, Snapshot Service, and Gesture Service (M3)
+        template_loader = TemplateLoader(gesture_repo)
+        snapshot_service = SnapshotService(template_loader, event_bus)
+        snapshot_service.rebuild_now()
+        gesture_service = GestureService(gesture_repo, snapshot_service, event_bus)
+
         # 5. Camera Subsystem
         camera_backend = OpenCVCameraBackend()
         camera_manager = CameraManager(
@@ -121,6 +144,31 @@ class Application:
             settings=validated_settings,
             event_bus=event_bus,
         )
+
+        # 5b. Tracker Backend & Recognition Engine (M3)
+        mediapipe_backend = MediaPipeTrackerBackend()
+        hand_tracker = HandTracker(mediapipe_backend)
+
+        import time
+
+        class SystemClock:
+            def time(self) -> float:
+                return time.time()
+            def monotonic(self) -> float:
+                return time.monotonic()
+            def monotonic_ns(self) -> int:
+                return time.monotonic_ns()
+            def sleep(self, seconds: float) -> None:
+                time.sleep(seconds)
+
+        clock = SystemClock()
+        trigger_validator = TriggerValidator(
+            clock=clock,
+            stable_duration_ms=validated_settings.stable_duration_ms,
+            cooldown_ms=validated_settings.cooldown_ms,
+            rearm_release_ms=validated_settings.rearm_release_ms,
+        )
+        recognition_engine = RecognitionEngine(clock=clock, trigger_validator=trigger_validator)
 
         # 6. Safety Boundary: ExecutionGate & Sinks
         execution_gate = ExecutionGate()
@@ -151,6 +199,18 @@ class Application:
             is_session_unlocked_check=lambda: True,
         )
 
+        # 8b. Recognition Pipeline Coordinator
+        recognition_pipeline = RecognitionPipeline(
+            camera_manager=camera_manager,
+            hand_tracker=hand_tracker,
+            recognition_engine=recognition_engine,
+            snapshot_service=snapshot_service,
+            runtime_controller=runtime_controller,
+            qt_bridge=qt_bridge,
+            settings=validated_settings,
+        )
+        recognition_pipeline.start()
+
         # Initialize OS adapters if on Windows and enabled
         if enable_os_adapters and sys.platform == "win32":
             hotkey_service = Win32GlobalHotkey(
@@ -171,6 +231,8 @@ class Application:
             on_start_live=lambda: runtime_controller.transition_to(RuntimeMode.LIVE, "User Start Live"),
             on_emergency_stop=lambda: runtime_controller.emergency_stop("User Clicked Stop"),
             qt_bridge=qt_bridge,
+            gesture_service=gesture_service,
+            runtime_controller=runtime_controller,
         )
         main_window.set_mode(RuntimeMode.STOPPED)
 
@@ -188,6 +250,10 @@ class Application:
             runtime_controller=runtime_controller,
             qt_bridge=qt_bridge,
             main_window=main_window,
+            gesture_service=gesture_service,
+            snapshot_service=snapshot_service,
+            recognition_pipeline=recognition_pipeline,
+            hand_tracker=hand_tracker,
             hotkey_service=hotkey_service,
             session_watcher=session_watcher,
         )
@@ -199,6 +265,18 @@ class Application:
             self.runtime_controller.emergency_stop("SHUTDOWN")
         except Exception as exc:
             logger.error("Error during controller stop: %s", exc)
+
+        if self.recognition_pipeline:
+            try:
+                self.recognition_pipeline.stop(timeout_sec=2.0)
+            except Exception as exc:
+                logger.error("Error stopping recognition pipeline: %s", exc)
+
+        if self.hand_tracker:
+            try:
+                self.hand_tracker.close()
+            except Exception as exc:
+                logger.error("Error closing hand tracker: %s", exc)
 
         if self.hotkey_service:
             try:

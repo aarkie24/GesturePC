@@ -10,8 +10,7 @@ from app.config import SettingsSchema
 from camera.capture_worker import CaptureWorker
 from camera.frame_types import LatestFrameMailbox, LosslessFrameQueue
 from domain.exceptions import CameraUnavailable
-from domain.ports import CameraBackend
-from services.event_bus import EventBus
+from domain.ports import CameraBackend, EventPublisher
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +22,7 @@ class CameraManager:
         self,
         backend: CameraBackend,
         settings: SettingsSchema,
-        event_bus: Optional[EventBus] = None,
+        event_bus: Optional[EventPublisher] = None,
     ) -> None:
         self._backend = backend
         self._settings = settings
