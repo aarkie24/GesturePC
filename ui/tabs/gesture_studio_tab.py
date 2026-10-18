@@ -28,7 +28,13 @@ from PySide6.QtWidgets import (
 from camera.frame_types import FramePacket
 from domain.enums import GestureType, Hand, RuntimeMode, TrackingStatus
 from domain.models import Gesture, GestureSample, RecordingResult, TrackingResult
-from gestures.recorder import RecorderProgress, RecorderState, StaticGestureRecorder
+from gestures.recorder import (
+    DynamicGestureRecorder,
+    DynamicRecorderProgress,
+    RecorderProgress,
+    RecorderState,
+    StaticGestureRecorder,
+)
 from services.gesture_service import GestureService
 from services.runtime_controller import RuntimeController
 from ui.components.camera_view import CameraView
@@ -54,6 +60,7 @@ class GestureStudioTab(QWidget):
         self._qt_bridge = qt_bridge
 
         self._recorder: Optional[StaticGestureRecorder] = None
+        self._dynamic_recorder: Optional[DynamicGestureRecorder] = None
         self._current_recording_result: Optional[RecordingResult] = None
         self._pending_collisions: List[Tuple[str, float]] = []
         self._editing_gesture_id: Optional[int] = None
@@ -129,13 +136,20 @@ class GestureStudioTab(QWidget):
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(8)
 
-        rec_group = QGroupBox("Record New Static Pose", right_widget)
-        rec_layout = QVBoxLayout(rec_group)
+        self.rec_group = QGroupBox("Record New Static Pose", right_widget)
+        rec_group = self.rec_group
+        rec_layout = QVBoxLayout(self.rec_group)
 
         # Config Row
         cfg_row = QHBoxLayout()
+        cfg_row.addWidget(QLabel("Type:"))
+        self.combo_type = QComboBox(self.rec_group)
+        self.combo_type.addItems(["Static Pose", "Dynamic Movement"])
+        self.combo_type.currentIndexChanged.connect(self._on_type_changed)
+        cfg_row.addWidget(self.combo_type)
+
         cfg_row.addWidget(QLabel("Tracked Hand:"))
-        self.combo_hand = QComboBox(rec_group)
+        self.combo_hand = QComboBox(self.rec_group)
         self.combo_hand.addItems(["Right Hand", "Left Hand", "Either Hand"])
         cfg_row.addWidget(self.combo_hand)
 
@@ -299,6 +313,22 @@ class GestureStudioTab(QWidget):
             target_hand = Hand.RIGHT
         elif "Left" in hand_choice:
             target_hand = Hand.LEFT
+    def _on_type_changed(self) -> None:
+        if self.combo_type.currentText() == "Dynamic Movement":
+            self.rec_group.setTitle("Record Dynamic Movement (3 Repetitions)")
+            self.txt_gesture_name.setPlaceholderText("e.g. Swipe Right, Wave, Circle...")
+            self.lbl_status.setText("Ready. Click 'Start Recording' and perform 3 repetitions.")
+        else:
+            self.rec_group.setTitle("Record Static Pose")
+            self.txt_gesture_name.setPlaceholderText("e.g. Open Palm, Thumbs Up, Fist...")
+            self.lbl_status.setText("Ready. Position hand and click 'Start Recording'.")
+
+    def _on_start_recording_clicked(self) -> None:
+        hand_choice = self.combo_hand.currentText()
+        if "Right" in hand_choice:
+            target_hand = Hand.RIGHT
+        elif "Left" in hand_choice:
+            target_hand = Hand.LEFT
         else:
             target_hand = Hand.EITHER
 
@@ -309,7 +339,6 @@ class GestureStudioTab(QWidget):
             QMessageBox.warning(self, "Cannot Record", f"Could not enter recording mode:\n{exc}")
             return
 
-        from tests.fakes.fake_clock import FakeClock
         import time
 
         class SystemClock:
@@ -322,11 +351,21 @@ class GestureStudioTab(QWidget):
             def sleep(self, seconds: float) -> None:
                 time.sleep(seconds)
 
-        self._recorder = StaticGestureRecorder(
-            clock=SystemClock(),
-            target_hand=target_hand,
-        )
-        self._recorder.start(target_hand)
+        is_dynamic = self.combo_type.currentText() == "Dynamic Movement"
+        if is_dynamic:
+            self._recorder = None
+            self._dynamic_recorder = DynamicGestureRecorder(
+                clock=SystemClock(),
+                target_hand=target_hand,
+            )
+            self._dynamic_recorder.start(target_hand)
+        else:
+            self._dynamic_recorder = None
+            self._recorder = StaticGestureRecorder(
+                clock=SystemClock(),
+                target_hand=target_hand,
+            )
+            self._recorder.start(target_hand)
 
         self.btn_start_record.setEnabled(False)
         self.btn_cancel_record.setEnabled(True)
@@ -337,6 +376,8 @@ class GestureStudioTab(QWidget):
     def _on_cancel_recording_clicked(self) -> None:
         if self._recorder is not None:
             self._recorder.cancel()
+        if self._dynamic_recorder is not None:
+            self._dynamic_recorder.cancel()
         try:
             self._controller.transition_to(RuntimeMode.STOPPED, "User cancelled recording")
         except Exception:
@@ -357,6 +398,9 @@ class GestureStudioTab(QWidget):
         if self._recorder is not None and tracking is not None:
             progress = self._recorder.feed_frame(tracking)
             self._update_recorder_ui(progress)
+        elif self._dynamic_recorder is not None and tracking is not None:
+            dyn_progress = self._dynamic_recorder.feed_frame(tracking)
+            self._update_dynamic_recorder_ui(dyn_progress)
 
     def _update_recorder_ui(self, progress: RecorderProgress) -> None:
         if progress.state == RecorderState.COUNTDOWN:
@@ -374,7 +418,44 @@ class GestureStudioTab(QWidget):
             self._on_recording_completed()
         elif progress.state == RecorderState.FAILED:
             self.lbl_status.setText(f"Capture Failed: {progress.feedback_message}")
-            self._controller.transition_to(RuntimeMode.STOPPED, "Recording failed")
+            try:
+                self._controller.transition_to(RuntimeMode.STOPPED, "Recording failed")
+            except Exception:
+                pass
+            self.btn_start_record.setEnabled(True)
+            self.btn_cancel_record.setEnabled(False)
+
+    def _update_dynamic_recorder_ui(self, progress: DynamicRecorderProgress) -> None:
+        if progress.state == RecorderState.COUNTDOWN:
+            secs = progress.countdown_remaining_ms / 1000.0
+            self.lbl_status.setText(
+                f"Repetition {progress.repetition_index + 1} of {progress.repetitions_target}\n"
+                f"Starting in {secs:.1f}s — {progress.feedback_message}"
+            )
+            pct = int((progress.repetitions_completed / float(progress.repetitions_target)) * 100)
+            self.progress_bar.setValue(pct)
+        elif progress.state == RecorderState.CAPTURING:
+            pct = int(
+                ((progress.repetitions_completed + progress.capture_progress_ratio)
+                 / float(progress.repetitions_target))
+                * 100
+            )
+            self.progress_bar.setValue(pct)
+            self.lbl_status.setText(
+                f"Repetition {progress.repetition_index + 1}/{progress.repetitions_target}: "
+                f"[{progress.segmenter_state}] {progress.feedback_message}"
+            )
+        elif progress.state == RecorderState.COMPLETED:
+            self.progress_bar.setValue(100)
+            self.lbl_status.setText(progress.feedback_message)
+            self._current_recording_result = self._dynamic_recorder.get_result()
+            self._on_recording_completed()
+        elif progress.state == RecorderState.FAILED:
+            self.lbl_status.setText(f"Recording Failed: {progress.feedback_message}")
+            try:
+                self._controller.transition_to(RuntimeMode.STOPPED, "Recording failed")
+            except Exception:
+                pass
             self.btn_start_record.setEnabled(True)
             self.btn_cancel_record.setEnabled(False)
 
@@ -391,20 +472,27 @@ class GestureStudioTab(QWidget):
 
         # Check collisions immediately for visual feedback
         if self._current_recording_result and self._current_recording_result.samples:
-            collisions = self._gesture_service.check_static_collisions(
-                samples=self._current_recording_result.samples,
-                hand=self._current_recording_result.hand,
-            )
+            if self._current_recording_result.gesture_type == GestureType.DYNAMIC:
+                collisions = self._gesture_service.check_dynamic_collisions(
+                    samples=self._current_recording_result.samples,
+                    hand=self._current_recording_result.hand,
+                )
+            else:
+                collisions = self._gesture_service.check_static_collisions(
+                    samples=self._current_recording_result.samples,
+                    hand=self._current_recording_result.hand,
+                )
+
             self._pending_collisions = collisions
             if collisions:
                 coll_str = ", ".join(f"'{name}' (dist={dist:.3f})" for name, dist in collisions)
                 self.lbl_collision_warning.setText(
-                    f"Warning: Pose is very close to existing gesture(s): {coll_str}.\n"
+                    f"Warning: Gesture is very close to existing gesture(s): {coll_str}.\n"
                     "Consider re-recording or use 'Save Anyway'."
                 )
                 self.btn_save_anyway.setVisible(True)
             else:
-                self.lbl_collision_warning.setText("Pose is unique. Ready to save!")
+                self.lbl_collision_warning.setText("Gesture is unique. Ready to save!")
                 self.btn_save_anyway.setVisible(False)
 
     def _on_save_gesture_clicked(self, allow_collision: bool) -> None:
@@ -419,7 +507,7 @@ class GestureStudioTab(QWidget):
 
         gesture, collisions = self._gesture_service.create_gesture(
             name=name,
-            gesture_type=GestureType.STATIC,
+            gesture_type=self._current_recording_result.gesture_type,
             hand=self._current_recording_result.hand,
             samples=self._current_recording_result.samples,
             threshold_scale=1.0,
@@ -454,3 +542,11 @@ class GestureStudioTab(QWidget):
                 self._recorder.cancel()
                 self.btn_start_record.setEnabled(True)
                 self.btn_cancel_record.setEnabled(False)
+            if self._dynamic_recorder is not None and self._dynamic_recorder.state in (
+                RecorderState.COUNTDOWN,
+                RecorderState.CAPTURING,
+            ):
+                self._dynamic_recorder.cancel()
+                self.btn_start_record.setEnabled(True)
+                self.btn_cancel_record.setEnabled(False)
+

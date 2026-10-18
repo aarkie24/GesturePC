@@ -220,6 +220,35 @@ class TriggerValidator:
             self._trackers[gesture_id] = _GestureTriggerTracker()
         return self._trackers[gesture_id]
 
+    def can_fire_dynamic(self, gesture_id: int, frame_ts_ns: int) -> bool:
+        """Checks if a dynamic gesture can fire given global cooldown and gesture cooldown."""
+        global_elapsed_ms = int((frame_ts_ns - self._last_global_fired_ts_ns) / 1_000_000)
+        if self._last_global_fired_ts_ns > 0 and global_elapsed_ms < self.global_cooldown_ms:
+            return False
+
+        tracker = self._get_tracker(gesture_id)
+        if tracker.state in (TriggerState.FIRED, TriggerState.COOLDOWN):
+            elapsed_ms = int((frame_ts_ns - tracker.fired_ts_ns) / 1_000_000)
+            if elapsed_ms < self.cooldown_ms:
+                return False
+        return True
+
+    def record_fire(self, gesture_id: int, frame_ts_ns: int) -> None:
+        """Records a fire event for a gesture, setting cooldowns."""
+        tracker = self._get_tracker(gesture_id)
+        tracker.state = TriggerState.COOLDOWN
+        tracker.fired_ts_ns = frame_ts_ns
+        tracker.rearm_start_ts_ns = 0
+        tracker.accumulated_ms = 0
+        self._last_global_fired_ts_ns = frame_ts_ns
+
+    def reset_accumulating(self) -> None:
+        """Resets all accumulating static candidates to IDLE (Section 7.5)."""
+        for tracker in self._trackers.values():
+            if tracker.state == TriggerState.ACCUMULATING:
+                tracker.state = TriggerState.IDLE
+                tracker.accumulated_ms = 0
+
     def reset_gesture(self, gesture_id: int) -> None:
         """Resets trigger state for a single gesture."""
         if gesture_id in self._trackers:
@@ -229,3 +258,4 @@ class TriggerValidator:
         """Resets all trigger validator states (e.g. on mode switch or camera restart)."""
         self._trackers.clear()
         self._last_global_fired_ts_ns = 0
+

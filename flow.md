@@ -307,6 +307,39 @@ This document explains how files, classes, and functions connect with each other
    - Stability hold progress bar (0 to 400 ms).
    - Accepted triggers table.
 
+### Flow G: Dynamic Gesture Recording, DTW Matching, and Arbitration
+1. Dynamic Recording in Gesture Studio:
+   - User selects Dynamic Gesture mode, enters gesture name and target hand.
+   - User performs 3 separate repetitions.
+   - For each repetition, `MotionSegmenter` automatically detects motion onset (speed $\ge 0.8\text{ palm/s}$ for 100 ms with 300 ms lookback) and motion cessation (speed $\le 0.3\text{ palm/s}$ for 250 ms).
+   - `validate_dynamic_recording()` verifies:
+     - Duration $\ge 400\text{ ms}$ and $\le 4500\text{ ms}$.
+     - Wrist path length $\ge 1.5$ palm units.
+     - Missing tracking ratio $\le 0.20$, no consecutive gap $> 150\text{ ms}$.
+   - Once 3 repetitions are recorded:
+     - Sequences are resampled to uniform 15 Hz grid via `resample_to_uniform_grid()`.
+     - Pairwise DTW distances computed: all pairs must satisfy $\le 0.50$ consistency limit.
+     - Base threshold calculated: $1.3 \times \max(\text{pairwise DTW})$ clamped to $[0.08, 0.50]$.
+     - `check_dynamic_collisions()` tests against existing dynamic templates (collision if DTW $\le 1.15 \times \text{base\_threshold}$).
+   - Persisted in SQLite with `GestureType.DYNAMIC`.
+
+2. Dynamic Runtime Recognition & Arbitration in RecognitionEngine:
+   - Every frame, `MotionSegmenter` updates finite-difference wrist speed with 80 ms EMA smoothing.
+   - **Arbitration Rules (§7.5):**
+     - While hand state is `MOVING` or `ACTIVE`, static gesture evaluation is suspended.
+     - Static pose accumulator is held at zero during movement to prevent transient false triggers.
+   - When `MotionSegmenter` emits `ENDED`:
+     - The segment frames (lookback buffer + active motion) are passed to `resample_to_uniform_grid(target_fps=15)`.
+     - `DynamicMatcher.match()` runs Sakoe-Chiba banded DTW ($w = 0.25 \times \max(n, m)$) against all compiled dynamic templates.
+     - Step cost: $1.0 \times \text{mean\_tip\_distance} + 2.0 \times \text{wrist\_trajectory\_distance}$, normalized by $(n + m)$.
+     - Early abandoning discards paths exceeding best-so-far distance.
+     - Margin ratio test: $d_1 / d_2 \le 0.85$.
+     - If best match $\le \text{threshold}$:
+       - `TriggerValidator.can_fire_dynamic()` enforces dynamic cooldown ($\ge 500\text{ ms}$) and rearm hand movement.
+       - Emits dynamic `RecognitionEvent` to active sink.
+   - Any segment completion (`ENDED` or `ABORTED`) resets static temporal accumulation back to 0 ms.
+
+
 ---
 
 ## 4. Threading Architecture & Boundaries

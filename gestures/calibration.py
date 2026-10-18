@@ -6,6 +6,9 @@ from typing import List, Sequence, Tuple
 import numpy as np
 
 from app.constants import (
+    DYNAMIC_D_MAX,
+    DYNAMIC_D_MIN,
+    DYNAMIC_THRESHOLD_SLACK,
     STATIC_THRESHOLD_MAX,
     STATIC_THRESHOLD_MIN,
     THRESHOLD_SLACK,
@@ -85,3 +88,97 @@ def check_static_collisions(
             collisions.append((name, min_mld))
 
     return collisions
+
+
+def calculate_dynamic_base_threshold(
+    sample_step_sequences: Sequence[np.ndarray],
+    threshold_slack: float = DYNAMIC_THRESHOLD_SLACK,
+    threshold_min: float = DYNAMIC_D_MIN,
+    threshold_max: float = DYNAMIC_D_MAX,
+) -> float:
+    """Calculates base threshold for a dynamic gesture from its resampled sample sequences.
+    
+    Section 7.5:
+    effective = clamp(1.3 * max pairwise sample DTW, dynamic_d_min 0.08, dynamic_d_max 0.5)
+    """
+    n = len(sample_step_sequences)
+    if n < 2:
+        return float((threshold_min + threshold_max) / 2.0)
+
+    from gestures.dynamic_matcher import banded_dtw_distance
+
+    max_dtw = 0.0
+    for i in range(n):
+        for j in range(i + 1, n):
+            dist = banded_dtw_distance(sample_step_sequences[i], sample_step_sequences[j])
+            if not np.isinf(dist) and dist > max_dtw:
+                max_dtw = dist
+
+    raw_base = threshold_slack * max_dtw
+    base = float(np.clip(raw_base, threshold_min, threshold_max))
+    return base
+
+
+def check_dynamic_sample_consistency(
+    sample_step_sequences: Sequence[np.ndarray],
+    max_allowed_dtw: float = DYNAMIC_D_MAX,
+) -> Tuple[bool, float]:
+    """Validates that pairwise DTW distances among repetitions do not exceed dynamic_d_max (0.5).
+    
+    Section 7.5:
+    If max pairwise exceeds dynamic_d_max, rejected as INCONSISTENT_SAMPLES.
+    
+    Returns:
+        (is_consistent, max_pairwise_dtw)
+    """
+    n = len(sample_step_sequences)
+    if n < 2:
+        return True, 0.0
+
+    from gestures.dynamic_matcher import banded_dtw_distance
+
+    max_dtw = 0.0
+    for i in range(n):
+        for j in range(i + 1, n):
+            dist = banded_dtw_distance(sample_step_sequences[i], sample_step_sequences[j])
+            if np.isinf(dist) or dist > max_allowed_dtw:
+                return False, float(dist)
+            if dist > max_dtw:
+                max_dtw = dist
+
+    return True, float(max_dtw)
+
+
+def check_dynamic_collisions(
+    new_sample_sequences: Sequence[np.ndarray],
+    new_threshold: float,
+    existing_gestures: Sequence[Tuple[str, Sequence[np.ndarray], float]],
+) -> List[Tuple[str, float]]:
+    """Checks for collisions between new dynamic samples and existing dynamic gestures of same hand.
+    
+    Section 7.5:
+    If any new sample is within existing gesture's effective threshold (or vice versa),
+    block save with collision warning.
+    """
+    from gestures.dynamic_matcher import banded_dtw_distance
+
+    collisions: List[Tuple[str, float]] = []
+
+    for name, existing_samples, existing_threshold in existing_gestures:
+        if not existing_samples:
+            continue
+
+        min_dtw = float("inf")
+        conflict_limit = max(new_threshold, existing_threshold)
+
+        for new_seq in new_sample_sequences:
+            for exist_seq in existing_samples:
+                d = banded_dtw_distance(new_seq, exist_seq, early_abandon_threshold=conflict_limit)
+                if d < min_dtw:
+                    min_dtw = d
+
+        if min_dtw <= conflict_limit:
+            collisions.append((name, min_dtw))
+
+    return collisions
+

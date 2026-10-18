@@ -8,6 +8,7 @@ from typing import Optional, Tuple
 import numpy as np
 
 from app.constants import (
+    DYNAMIC_MARGIN_RATIO,
     MARGIN_RATIO,
     SENSITIVITY,
     STATIC_MAX_SPEED,
@@ -20,13 +21,19 @@ from domain.models import (
     TrackingResult,
 )
 from domain.ports import Clock
-from gestures.feature_extractor import extract_static_features
+from gestures.dynamic_matcher import DynamicMatcher, DynamicTemplate
+from gestures.feature_extractor import (
+    extract_dynamic_step_features,
+    extract_static_features,
+)
 from gestures.hand_selector import HandSelector
 from gestures.normalizer import (
     DegenerateHandError,
     aspect_correct_image_landmarks,
     compute_palm_unit_image,
 )
+from gestures.resampler import resample_step_vectors
+from gestures.segmenter import MotionSegmenter, SegmenterState
 from gestures.static_matcher import StaticMatcher, StaticTemplate
 from gestures.trigger_validator import TriggerValidator
 
@@ -38,27 +45,24 @@ class RecognitionEngine:
         self,
         clock: Clock,
         trigger_validator: Optional[TriggerValidator] = None,
+        segmenter: Optional[MotionSegmenter] = None,
     ) -> None:
         self._clock = clock
         self._trigger_validator = trigger_validator or TriggerValidator(clock=clock)
-
-        # State for hand speed calculation (Section 7.5: 80 ms time constant smoothing)
-        self._last_wrist_pos: Optional[np.ndarray] = None
-        self._last_ts_ns: int = 0
-        self._last_palm_unit: float = 1.0
-        self._smoothed_speed: float = 0.0
+        self._segmenter = segmenter or MotionSegmenter()
 
     @property
     def trigger_validator(self) -> TriggerValidator:
         return self._trigger_validator
 
+    @property
+    def segmenter(self) -> MotionSegmenter:
+        return self._segmenter
+
     def reset(self) -> None:
-        """Resets engine state and trigger validator."""
+        """Resets engine state, trigger validator, and motion segmenter."""
         self._trigger_validator.reset()
-        self._last_wrist_pos = None
-        self._last_ts_ns = 0
-        self._last_palm_unit = 1.0
-        self._smoothed_speed = 0.0
+        self._segmenter.reset()
 
     def process(
         self,
@@ -72,10 +76,10 @@ class RecognitionEngine:
         
         Pure pipeline:
         1. Select hand (HandSelector)
-        2. Compute hand speed & check motion state
-        3. Extract normalized static features
-        4. Match against StaticTemplates in snapshot
-        5. Validate candidate stability & cooldown with TriggerValidator
+        2. Feed MotionSegmenter to track dynamic movements
+        3. Arbitrate static vs dynamic gestures (Section 7.5)
+        4. If segment completed (ENDED): match against DynamicTemplates
+        5. If IDLE and still: match against StaticTemplates and evaluate TriggerValidator
         6. Produce FrameAnalysis and optional RecognitionEvent
         """
         ts_ns = tracking_result.capture_ts_ns or self._clock.monotonic_ns()
@@ -84,6 +88,7 @@ class RecognitionEngine:
         # 1. Hand Selection
         selection = HandSelector.select_hand(tracking_result, tracked_hand)
         if selection.hand is None or selection.status != TrackingStatus.OK:
+            self._segmenter.update(None, None, w, h, ts_ns)
             val_res = self._trigger_validator.update(None, ts_ns)
             analysis = FrameAnalysis(
                 frame_id=tracking_result.frame_id,
@@ -107,39 +112,111 @@ class RecognitionEngine:
         hand = selection.hand
         hand_laterality = Hand.RIGHT if hand.label.capitalize() == "Right" else Hand.LEFT
 
-        # 2. Hand Speed Computation
-        corrected_image = aspect_correct_image_landmarks(hand.landmarks_image, w, h)
-        curr_wrist = corrected_image[0, :2]
-        curr_palm = compute_palm_unit_image(corrected_image)
-        if curr_palm > 1e-4:
-            self._last_palm_unit = curr_palm
+        # 2. Update Motion Segmenter & speed
+        seg_state = self._segmenter.update(
+            landmarks_world=hand.landmarks_world,
+            landmarks_image=hand.landmarks_image,
+            frame_width=w,
+            frame_height=h,
+            timestamp_ns=ts_ns,
+        )
+        speed = self._segmenter.smoothed_speed
 
-        speed = 0.0
-        if self._last_wrist_pos is not None and self._last_ts_ns > 0:
-            dt_s = (ts_ns - self._last_ts_ns) / 1e9
-            if 0.001 <= dt_s <= 0.5:
-                delta_px = float(np.linalg.norm(curr_wrist - self._last_wrist_pos))
-                delta_palm = delta_px / max(self._last_palm_unit, 1e-4)
-                raw_speed = delta_palm / dt_s
+        # 3. Static/Dynamic Arbitration (Section 7.5)
+        # Case A: Motion segment ended -> match dynamic gesture once
+        if seg_state == SegmenterState.ENDED:
+            # Static accumulation restarts from zero (Section 7.5)
+            self._trigger_validator.reset_accumulating()
+            seg = self._segmenter.pop_segment()
 
-                # Exponential smoothing with 80 ms time constant (Section 7.5)
-                alpha = 1.0 - np.exp(-dt_s / 0.080)
-                self._smoothed_speed += alpha * (raw_speed - self._smoothed_speed)
-                speed = self._smoothed_speed
+            if seg is not None and len(seg.frames) >= 2:
+                ref_wrist = seg.frames[0].wrist_corrected
+                palm_scale = seg.segment_palm_scale
+                steps = []
+                for f in seg.frames:
+                    s_vec = extract_dynamic_step_features(
+                        landmarks_world=f.landmarks_world,
+                        landmarks_image=f.landmarks_image,
+                        frame_width=w,
+                        frame_height=h,
+                        ref_wrist_image=ref_wrist,
+                        segment_palm_scale=palm_scale,
+                    )
+                    steps.append(s_vec)
 
-        self._last_wrist_pos = curr_wrist.copy()
-        self._last_ts_ns = ts_ns
+                steps_arr = np.stack(steps, axis=0)
+                resampled = resample_step_vectors(steps_arr, seg.timestamps_ms)
 
-        motion_state = "MOVING" if speed > STATIC_MAX_SPEED else "STATIONARY"
+                if resampled is not None:
+                    dyn_templates = [t for t in snapshot.templates if isinstance(t, DynamicTemplate)]
+                    dyn_result = DynamicMatcher.match(
+                        live_steps=resampled,
+                        selected_hand=hand_laterality,
+                        templates=dyn_templates,
+                        global_sensitivity=global_sensitivity,
+                        margin_ratio_limit=DYNAMIC_MARGIN_RATIO,
+                    )
 
-        # If hand is moving, static matching is gated out (Section 7.4 / 7.5)
-        if motion_state == "MOVING":
+                    event: Optional[RecognitionEvent] = None
+                    if dyn_result.accepted and dyn_result.best_gesture_id is not None:
+                        if self._trigger_validator.can_fire_dynamic(dyn_result.best_gesture_id, ts_ns):
+                            self._trigger_validator.record_fire(dyn_result.best_gesture_id, ts_ns)
+                            now_utc = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                            event = RecognitionEvent(
+                                event_id=str(uuid.uuid4()),
+                                gesture_id=dyn_result.best_gesture_id,
+                                gesture_name=dyn_result.best_gesture_name,
+                                gesture_type=GestureType.DYNAMIC,
+                                hand=hand_laterality,
+                                capture_ts_ns=ts_ns,
+                                timestamp_utc=now_utc,
+                                distance=dyn_result.best_distance,
+                                threshold=dyn_result.threshold,
+                                margin_ratio=dyn_result.margin_ratio,
+                            )
+                            outcome_str = "MATCH"
+                            trigger_st = TriggerState.FIRED
+                        else:
+                            outcome_str = "COOLDOWN"
+                            trigger_st = TriggerState.COOLDOWN
+                    else:
+                        outcome_str = "SEGMENT_NO_MATCH"
+                        trigger_st = TriggerState.IDLE
+
+                    analysis = FrameAnalysis(
+                        frame_id=tracking_result.frame_id,
+                        capture_ts_ns=ts_ns,
+                        hand_status=TrackingStatus.OK,
+                        motion_state="ENDED",
+                        hand_speed=speed,
+                        best_gesture_id=dyn_result.best_gesture_id,
+                        best_distance=dyn_result.best_distance,
+                        second_gesture_id=dyn_result.second_gesture_id,
+                        second_distance=dyn_result.second_distance,
+                        threshold=dyn_result.threshold,
+                        margin_ratio=dyn_result.margin_ratio,
+                        outcome=outcome_str,
+                        reject_reason=dyn_result.reject_reason or (
+                            None if dyn_result.accepted else RejectReason.SEGMENT_NO_MATCH
+                        ),
+                        trigger_state=trigger_st,
+                        accumulated_ms=0,
+                    )
+                    return analysis, event
+
+        # Case B: Segment is aborted
+        if seg_state == SegmenterState.ABORTED:
+            self._trigger_validator.reset_accumulating()
+            self._segmenter.reset()
+
+        # Case C: Hand moving or segmenter active -> static matching is gated out (Section 7.5)
+        if seg_state == SegmenterState.ACTIVE or speed > STATIC_MAX_SPEED:
             val_res = self._trigger_validator.update(None, ts_ns)
             analysis = FrameAnalysis(
                 frame_id=tracking_result.frame_id,
                 capture_ts_ns=ts_ns,
                 hand_status=TrackingStatus.OK,
-                motion_state=motion_state,
+                motion_state="MOVING",
                 hand_speed=speed,
                 best_gesture_id=None,
                 best_distance=float("inf"),
@@ -154,7 +231,8 @@ class RecognitionEngine:
             )
             return analysis, None
 
-        # 3. Extract Static Features
+        # Case D: IDLE & stationary -> static gesture matching
+        motion_state = "STATIONARY"
         try:
             live_features = extract_static_features(hand.landmarks_world)
         except DegenerateHandError:

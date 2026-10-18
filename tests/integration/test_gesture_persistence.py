@@ -105,3 +105,67 @@ def test_gesture_crud_lifecycle(temp_db_conn):
     cursor.execute("PRAGMA foreign_key_check;")
     assert cursor.fetchall() == []
     cursor.close()
+
+
+def test_dynamic_gesture_persistence_and_snapshot(temp_db_conn):
+    from gestures.dynamic_matcher import DynamicTemplate
+    from gestures.template_loader import TemplateLoader
+
+    repo = GestureRepository(temp_db_conn)
+
+    # 1. Create multi-frame dynamic gesture sample
+    frame_count = 20
+    ts_ms = np.linspace(0, 600, frame_count).astype(np.int32)
+    world = np.zeros((frame_count, 21, 3), dtype=np.float32)
+    img = np.zeros((frame_count, 21, 3), dtype=np.float32)
+
+    for i in range(frame_count):
+        # Middle MCP
+        world[i, 9, 1] = 0.08
+        img[i, 0, :2] = [0.5 + 0.01 * i, 0.5]
+        img[i, 9, :2] = [0.5 + 0.01 * i, 0.35]
+
+    sample = GestureSample(
+        id=None,
+        gesture_id=0,
+        sample_index=0,
+        frame_count=frame_count,
+        duration_ms=600,
+        landmarks_image=img,
+        landmarks_world=world,
+        timestamps_ms=ts_ms,
+        frame_aspect_ratio=4.0 / 3.0,
+        tracker_model_id=TRACKER_MODEL_ID,
+        preprocess_json="{}",
+    )
+
+    gesture = Gesture(
+        id=None,
+        name="Swipe Right",
+        gesture_type=GestureType.DYNAMIC,
+        hand=Hand.RIGHT,
+    )
+
+    created = repo.create(gesture, [sample])
+    assert created.id is not None
+    assert created.gesture_type == GestureType.DYNAMIC
+
+    # 2. Verify persistence roundtrip
+    saved_samples = repo.get_samples_for_gesture(created.id)
+    assert len(saved_samples) == 1
+    assert saved_samples[0].frame_count == frame_count
+    assert saved_samples[0].timestamps_ms is not None
+    np.testing.assert_array_equal(saved_samples[0].timestamps_ms, ts_ms)
+    np.testing.assert_array_equal(saved_samples[0].landmarks_image, img)
+    np.testing.assert_array_equal(saved_samples[0].landmarks_world, world)
+
+    # 3. Verify TemplateLoader compiles DynamicTemplate
+    loader = TemplateLoader(repo)
+    snapshot = loader.load_snapshot(revision=1)
+    assert len(snapshot.templates) == 1
+    tmpl = snapshot.templates[0]
+    assert isinstance(tmpl, DynamicTemplate)
+    assert tmpl.gesture_name == "Swipe Right"
+    assert len(tmpl.samples) == 1
+    assert tmpl.base_threshold > 0.0
+

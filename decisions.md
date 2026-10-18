@@ -312,3 +312,40 @@ This document tracks all major design and engineering decisions for **Gesture PC
 * **Decision:** `TriggerValidator` is the sole owner of all time-based stability accumulation (400 ms), tracking gap tolerance (120 ms), per-gesture cooldowns (1500 ms), rearming release (300 ms), and global event intervals (500 ms). It runs identically in Test and Live modes using monotonically increasing frame timestamps injected via the `Clock` port. Hand speed is smoothed with an 80 ms time-constant exponential moving average (EMA) filter.
 * **Reason:** Ensures deterministic behavior in tests, prevents held poses from repeatedly firing actions, and guarantees Test mode accurately previews Live mode behavior.
 * **Enforcement:** `gestures/trigger_validator.py`, `gestures/recognition_engine.py`, Criterion AC-06.
+
+---
+
+### DEC-29: Sakoe-Chiba Banded DTW with Step Feature Weighting for Dynamic Matching
+* **Status:** Accepted (Validated in Milestone 4)
+* **Context:** Dynamic gestures involve complex spatio-temporal trajectories (e.g. swipes, circles, waves) performed at variable speeds.
+* **Decision:** Dynamic step vectors are 17-dimensional: 15 shape coordinates (5 normalized fingertips $x, y, z$) plus 2 trajectory coordinates ($\Delta x, \Delta y$ wrist in aspect-corrected image space relative to segment onset, scaled by median palm size). Matching uses Sakoe-Chiba banded DTW with band fraction 0.25, length-ratio pre-filter ($0.5\text{--}2.0\times$), and early abandoning. Step cost is $1.0 \times \text{mean\_tip}\|\Delta\text{tip}\| + 2.0 \times \|\Delta\text{wrist}\|_2$, normalized by sequence length sum $(n + m)$. Margin ratio limit is 0.85.
+* **Reason:** Trajectory is prioritized ($w_{\text{traj}} = 2.0$) while preserving finger pose ($w_{\text{shape}} = 1.0$). DTW normalization ensures duration-invariant scoring. Early abandoning guarantees meeting the $\le 20\text{ ms}$ latency budget for 10 gestures (30 comparisons).
+* **Enforcement:** `gestures/dynamic_matcher.py`, Section 7.3 & 7.5.
+
+---
+
+### DEC-30: Timestamp-Based Linear Resampling to Fixed Grid (15 Hz)
+* **Status:** Accepted (Validated in Milestone 4)
+* **Context:** Frame rate fluctuations under system load, camera exposure changes, or frames dropped by the live mailbox could distort DTW alignment if raw frame counts were used.
+* **Decision:** Both template samples and live motion segments are resampled to a fixed temporal grid of `match_rate_hz` (15 Hz, $\approx 66.67\text{ ms}$ interval) using piecewise linear interpolation over real monotonic timestamps. Tracking gaps up to 150 ms are interpolated; any gap $> 150\text{ ms}$ invalidates the sequence.
+* **Reason:** Decouples gesture matching from camera capture FPS, guarantees reproducible distances across machines, and bounds the computational cost of DTW tables to $\approx 45 \times 45$ cells.
+* **Enforcement:** `gestures/resampler.py`, Section 7.5.
+
+---
+
+### DEC-31: Finite-Difference Hand Speed Segmentation and Static/Dynamic Arbitration
+* **Status:** Accepted (Validated in Milestone 4)
+* **Context:** Hand movement during a dynamic swipe must not falsely trigger static gestures, and motion start/end must be reliably detected in real time without lagging.
+* **Decision:** `MotionSegmenter` calculates finite-difference wrist speed in aspect-corrected image coordinates scaled by running median palm size (1 s window), smoothed with an 80 ms EMA time constant. Transitions `IDLE -> ACTIVE` when speed $\ge 0.8\text{ palm/s}$ for 100 ms (capturing 300 ms pre-motion lookback). Transitions `ACTIVE -> ENDED` when speed $\le 0.3\text{ palm/s}$ for 250 ms (or max segment timeout of 4500 ms). Static gestures are evaluated only when segmenter is `IDLE` and hand speed $< 0.35\text{ palm/s}$. When any segment reaches `ENDED`, dynamic matching runs once, and static accumulation restarts from zero.
+* **Reason:** Prevents accidental mid-motion static fires, bounds segment evaluation to completion time, and ensures a clean rest pose is held before any static gesture can trigger again.
+* **Enforcement:** `gestures/segmenter.py`, `gestures/recognition_engine.py`, Section 7.5.
+
+---
+
+### DEC-32: Dynamic Calibration, Multi-Repetition Consistency, and Collision Checks
+* **Status:** Accepted (Validated in Milestone 4)
+* **Context:** Users vary when performing dynamic motions, risking recording erratic repetitions or gestures that collide with existing ones.
+* **Decision:** Dynamic recording requires 3 valid repetitions in a session. A consistency check asserts that $\max_{i \ne j} \text{DTW}(s_i, s_j) \le 0.50$ (`dynamic_d_max`), rejecting inconsistent sessions. Base threshold is calibrated as $\text{clamp}(1.3 \times \max_{i \ne j} \text{DTW}(s_i, s_j), 0.08, 0.50)$. Collisions are checked against existing dynamic gestures of the same hand using pairwise DTW distances.
+* **Reason:** Enforces high quality and repeatability in user-recorded templates before persistence, avoiding unreliable runtime triggers.
+* **Enforcement:** `gestures/calibration.py`, `gestures/recorder.py`, `services/gesture_service.py`, Section 7.5.
+
